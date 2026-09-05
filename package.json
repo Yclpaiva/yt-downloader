@@ -1,0 +1,17 @@
+{
+  "name": "yt-downloader",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "bun run build.ts",
+    "check": "tsc --noEmit",
+    "test": "bun test",
+    "install-host": "./install.sh"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.0",
+    "@types/chrome": "^0.2.8",
+    "typescript": "^7.0.2"
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "YT Downloader",
+  "version": "0.1.0",
+  "description": "Botao sobre videos e thumbnails do YouTube para baixar video (com escolha de qualidade), thumbnail ou legendas via yt-dlp local. Downloads aparecem no Chrome.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAne3Jq6tg19a0pFJEHp7nq/ugm6VzXs5YJctsPrhJsWlzxpHv7l5nORTN2LzK2wOQ6F38OHm7ODS/cnUGqmVeYCin824lr67HkAWA6YPK2vqmYoSvwm9BfK3C9/JZq6hoW/6B8w/QEQ+xQocKZf/t3VRsBVc9C1W/KMKdwS283vAbeg9cdmudqq9Y/dMfqPMjxr+alCkaoEBQ6Mck0f8W6GBc9Fuja4RCDfub0iJdGt1i4h2RyvX+DRUa/pS5A/kWlwL5EZgOTGrYevA29OsTTP8H478R/y+A6bA/4qOIF7EEM/UNkihlt49/ZKnTWnk/KWlPPcOQFSIn05WEzLCx2wIDAQAB",
+  "permissions": [
+    "nativeMessaging",
+    "downloads"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.youtube.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  }
+}
