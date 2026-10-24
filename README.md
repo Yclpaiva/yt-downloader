@@ -1,111 +1,101 @@
-<div align="center">
-
 # YT Downloader
 
-**A download button that lives inside the YouTube player.**
-
-Videos in the quality you pick · Thumbnails · Subtitles
-
-[![Chrome](https://img.shields.io/badge/Chrome-MV3-4285F4?logo=googlechrome&logoColor=white)](https://developer.chrome.com/docs/extensions/develop/concepts/manifest-v3)
-[![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
-[![Bun](https://img.shields.io/badge/Bun-built_with-fbf0c9?logo=bun&logoColor=black)](https://bun.sh)
-[![License](https://img.shields.io/badge/license-private-lightgrey)](#license)
-
-</div>
-
----
-
-YT Downloader overlays a small button on the YouTube player and on every video
-thumbnail. It follows the player's own controls: invisible until you move the
-mouse, gone a few seconds after you stop. Downloads run through the native
-Chrome download bubble, with progress, file name and native errors.
-
-## What it does
-
-| Where | What you get |
-| --- | --- |
-| Player & Shorts | Video in MP4 (H.264 + AAC), one menu entry per available height |
-| Video thumbnails | Button on feed, search and channel grids |
-| Menu → Thumbnail | Cover image as JPG |
-| Menu → Legendas | Subtitles as SRT, manual first, auto ones tagged "auto" |
-
-Files land in a `YouTube/` folder inside Chrome's download directory.
-
-## How it works
-
-```
-content.ts ──port──▶ background.ts ──connectNative──▶ host/run.sh → ytdl-host.ts
-                           │                                  │
-                           └── chrome.downloads.download ◀── http://127.0.0.1:<port>/dl/<token>
-```
-
-1. The content script mounts the button and reads the video id at click time,
-   so the button never goes stale when YouTube recycles elements.
-2. Opening the menu asks the native host for `info`: title, available heights
-   and subtitle tracks.
-3. Picking an item returns a one-shot loopback URL; the service worker hands it
-   to `chrome.downloads.download`, and from there it is a regular Chrome
-   download.
-4. The host streams yt-dlp output through ffmpeg straight into the HTTP
-   response — no temp files for video. Thumbnail and subtitles are generated in
-   a temp dir and served right after.
-
-The heavy lifting is [yt-dlp](https://github.com/yt-dlp/yt-dlp) + ffmpeg via
-native messaging. The extension extracts nothing on its own, so it keeps
-working as long as `yt-dlp` is up to date (`brew upgrade yt-dlp`).
+Download YouTube videos with audio, thumbnails and subtitles directly in Chrome.
+The extension uses the browser's YouTube player session and assembles the finished
+file locally in JavaScript. No yt-dlp, ffmpeg, Bun host or cookie export is needed
+while downloading.
 
 ## Install
 
-Prerequisites: `brew install yt-dlp ffmpeg` and [Bun](https://bun.sh).
+[Bun](https://bun.sh) is needed only to build the extension:
 
 ```sh
-./install.sh
+bun install
+bun run build
 ```
 
-The script builds `dist/` and registers the native messaging host
-(`dev.yclpaiva.ytdl`) for Chrome (and Edge, if present). Then:
+In Chrome 124 or newer:
 
-1. Open `chrome://extensions`
-2. Enable **Developer mode**
-3. **Load unpacked** → select the `dist/` folder
+1. Open `chrome://extensions` and enable **Developer mode**.
+2. Select **Load unpacked** and choose this project's `dist/` directory.
+3. Reload your YouTube tabs.
 
-If you move the project folder, run `./install.sh` again — the host manifest
-points to the absolute path of `host/run.sh`.
+After rebuilding, reload the extension and the YouTube tab. Version 0.2 requests
+access to YouTube's media and thumbnail domains so downloads can run inside the
+browser. It does not request the cookies API or send your session to a server.
+
+Existing installations can keep their old native host registration; this version
+does not call it. The old host source and its previous instructions remain in
+[`docs/legacy-host.md`](docs/legacy-host.md) for reference.
+
+## Use
+
+Move the pointer over the player or a video thumbnail. The download button sits
+56 pixels below the top of the media, clear of the top row of native controls.
+
+- Choose a resolution to save a complete MP4 with audio.
+- Choose **Thumbnail** to save the cover as JPG.
+- Choose a subtitle track to save it as SRT. Automatic tracks are marked `auto`.
+- While downloading, click the button to see progress or cancel.
+
+Files go into `YouTube/` inside Chrome's download directory. The button only
+reports completion after Chrome finishes saving. An error remains available on
+the button so you can read it and retry.
+
+A muted, inactive YouTube tab may appear while preparing a thumbnail's video or
+renewing playback verification. It uses the same browser profile and is closed
+when no longer needed. Downloads continue if you navigate away from the original
+video. Keep Chrome open until the download finishes.
+
+## How it works
+
+The extension observes the player's SABR request and reads the matching player
+response. It reuses the media context and obtains fresh playback attestation from
+the genuine player when YouTube requests renewal. Cookies are not exported.
+
+A Chrome offscreen document downloads the audio and video streams with
+[`googlevideo`](https://github.com/LuanRT/googlevideo), writing them to temporary
+browser storage. [`Mediabunny`](https://mediabunny.dev) then copies the encoded
+packets into one MP4 without re-encoding. Files are read and written in chunks;
+the entire video is not accumulated in a JavaScript array or WebAssembly heap.
+
+Chrome saves the completed file through its normal downloads API. Temporary
+files and the object URL are removed on completion, cancellation or failure.
+
+## Limits
+
+- One download runs at a time.
+- Live broadcasts must end before downloading. DRM-protected content is not
+  supported.
+- YouTube can still require a visible login or verification. Complete it on the
+  video page and retry; the extension does not solve CAPTCHAs.
+- Available resolutions and codecs come from YouTube. High resolutions may use
+  codecs that require a compatible player; the extension does not transcode.
+- Temporary storage needs space for the separate tracks and the assembled file.
+- Only subtitle tracks supplied by the player are offered. YouTube can reject a
+  subtitle request independently of video playback.
+- Browser and YouTube protocol changes can require an extension update.
 
 ## Development
 
 ```sh
-bun run check   # tsc
-bun test        # framing, metadata, yt-dlp arguments
-bun run build   # dist/
+bun run check
+bun test
+bun run build
 ```
 
-```
-src/
-├── content.ts      # DOM scanning, button overlay, auto-hide, menu
-├── background.ts   # native messaging bridge + chrome.downloads wiring
-└── messages.ts     # content ⇄ background ⇄ host contract
-host/
-├── ytdl-host.ts    # native messaging host: stdio framing, loopback HTTP server
-└── lib.ts          # yt-dlp argument builders and metadata parsing
-```
+Tests cover player parsing, quality selection, endpoint validation, subtitle
+conversion, browser muxing, truncated streams and cancellation. The media fixture
+contains two seconds of synthetic color bars and a 440 Hz tone, so tests do not
+require native media tools.
 
-The host runs straight from source with Bun — changes to `host/` apply on the
-next click, no reinstall. Changes to `src/` need `bun run build` and a refresh
-in `chrome://extensions`.
+Runtime code:
 
-## Limitations
+- `src/content.ts`: overlay, menus and job updates.
+- `src/background.ts`: job coordination and Chrome downloads.
+- `src/browser-player.ts`: player session and playback-context renewal.
+- `src/offscreen.ts`: media transfer, temporary storage and cleanup.
+- `src/media.ts`: encoded audio/video packet muxing.
+- `src/youtube.ts`: response parsing, format selection and SRT conversion.
 
-- Only works on this machine, where the host is registered.
-- Cannot be published to the Chrome Web Store: YouTube downloaders are banned there.
-- Playlists are never downloaded; the button always picks a single video.
-- Chrome doesn't know the final size up front, so the download bar shows bytes
-  received instead of a percentage.
-- The MP4 is fragmented (streamed). QuickTime, VLC and browsers play it fine;
-  some old editors prefer a conventional MP4 — remux with
-  `ffmpeg -i in.mp4 -c copy out.mp4`.
-
-## License
-
-Personal project, published as-is. YouTube's terms apply to whatever you
-download.
+The `host/` directory is legacy source and is not included in `dist/`.

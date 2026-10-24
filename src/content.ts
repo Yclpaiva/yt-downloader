@@ -1,6 +1,6 @@
-import type { Request, Response, Target } from "./messages";
+import { isActive, type BrowserRequest, type BrowserResponse, type DownloadJob, type Target } from "./messages";
 
-type Info = Extract<Response, { type: "info" }>;
+type Info = Extract<BrowserResponse, { type: "info" }>;
 
 const HOST_ATTR = "data-ytdl";
 const MIN_SIZE = 100;
@@ -24,6 +24,7 @@ const STYLE = `
     transition: opacity .15s, background .15s; backdrop-filter: blur(4px); }
   .btn:hover { opacity: 1; background: rgba(0,0,0,.9); }
   .btn[data-state="busy"] { cursor: progress; }
+  .btn[data-state="busy"] svg { animation: pulse 1s ease-in-out infinite; }
   .btn[data-state="done"] { background: #1f8a4c; }
   .btn[data-state="error"] { background: #c0392b; }
   svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2.2;
@@ -38,12 +39,13 @@ const STYLE = `
   .item small { color: #aaa; margin-left: 6px; }
   .label { padding: 8px 10px 4px; color: #aaa; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
   hr { border: 0; border-top: 1px solid #3a3a3a; margin: 6px 0; }
+  .status { padding: 8px 10px; white-space: normal; line-height: 1.5; }
+  @keyframes pulse { 50% { opacity: .35; } }
 `;
 
 // --- context -----------------------------------------------------------------
 
 const videoIdIn = (text: string) => VIDEO_ID_RE.exec(text)?.[1] ?? null;
-const watchUrl = (id: string) => `https://www.youtube.com/watch?v=${id}`;
 
 /** Player surfaces on watch and shorts pages: the id comes from the URL at click time. */
 const isPlayer = (el: Element) => el.matches("#movie_player, #shorts-player");
@@ -54,31 +56,42 @@ function isThumbnailLink(el: Element): el is HTMLAnchorElement {
   return el.querySelector("img, yt-image") !== null;
 }
 
-// --- native bridge -----------------------------------------------------------
+// --- browser jobs ------------------------------------------------------------
 
-/** Opens a port for one request and resolves on the terminal message. */
-function request(message: Request): Promise<Response> {
-  return new Promise((resolve, reject) => {
-    const port = chrome.runtime.connect({ name: "ytdl" });
-    port.onMessage.addListener((response: Response) => {
-      port.disconnect();
-      response.type === "error" ? reject(new Error(response.message)) : resolve(response);
-    });
-    port.onDisconnect.addListener(() => reject(new Error("Conexão com a extensão caiu")));
-    port.postMessage(message);
-  });
+async function request(message: BrowserRequest): Promise<BrowserResponse> {
+  const response: BrowserResponse | undefined = await chrome.runtime.sendMessage(message);
+  if (!response) throw new Error("A extensão não respondeu. Recarregue a página.");
+  if (response.type === "error") throw new Error(response.message);
+  return response;
 }
 
-const infoCache = new Map<string, Promise<Info>>();
+const jobs = new Map<string, DownloadJob>();
+const overlays = new Map<HTMLElement, () => void>();
+const syncOverlays = () => {
+  for (const [host, sync] of overlays) host.isConnected ? sync() : overlays.delete(host);
+};
+function updateJob(job: DownloadJob) {
+  if ((jobs.get(job.videoId)?.updatedAt ?? 0) > job.updatedAt) return;
+  jobs.set(job.videoId, job);
+  syncOverlays();
+}
+chrome.runtime.onMessage.addListener((message: { type?: string; job?: DownloadJob }, sender) => {
+  if (sender.id === chrome.runtime.id && message.type === "job-update" && message.job) updateJob(message.job);
+});
+void request({ type: "jobs" }).then((response) => {
+  if (response.type === "jobs") for (const job of response.jobs) updateJob(job);
+}).catch(() => {});
+
+const infoCache = new Map<string, { value: Promise<Info>; expires: number }>();
 function infoFor(id: string): Promise<Info> {
   const cached = infoCache.get(id);
-  if (cached) return cached;
-  const promise = request({ type: "info", url: watchUrl(id) }).then((r) => {
-    if (r.type !== "info") throw new Error("Resposta inesperada do host");
+  if (cached && cached.expires > Date.now()) return cached.value;
+  const promise = request({ type: "info", videoId: id }).then((r) => {
+    if (r.type !== "info") throw new Error("Não consegui obter as opções deste vídeo.");
     return r;
   });
   promise.catch(() => infoCache.delete(id));
-  infoCache.set(id, promise);
+  infoCache.set(id, { value: promise, expires: Date.now() + 30_000 });
   return promise;
 }
 
@@ -105,6 +118,7 @@ function mount(frame: HTMLElement, getVideoId: () => string | null): HTMLElement
   root.innerHTML = `<style>${STYLE}</style><button class="btn" type="button"></button><div class="menu" hidden></div>`;
   const button = root.querySelector<HTMLButtonElement>(".btn")!;
   const menu = root.querySelector<HTMLDivElement>(".menu")!;
+  let showingJob = false;
 
   let resetTimer: ReturnType<typeof setTimeout> | undefined;
   const setState = (state: State, title: string) => {
@@ -112,7 +126,7 @@ function mount(frame: HTMLElement, getVideoId: () => string | null): HTMLElement
     button.title = title;
     button.innerHTML = ICONS[state === "busy" ? "idle" : state];
     clearTimeout(resetTimer);
-    if (state === "done" || state === "error") {
+    if (state === "done") {
       resetTimer = setTimeout(() => setState("idle", "Baixar"), 4000);
     }
   };
@@ -135,14 +149,16 @@ function mount(frame: HTMLElement, getVideoId: () => string | null): HTMLElement
     if (!event.composedPath().includes(host)) closeMenu();
   };
 
-  /** Hands the job to the host; Chrome's own download UI takes over from there. */
+  /** A job survives page navigation; only Chrome's completion event marks it done. */
   async function download(id: string, target: Target) {
     closeMenu();
     setState("busy", "Preparando download…");
     try {
-      await request({ type: "download", url: watchUrl(id), target });
-      setState("done", "Download iniciado. Acompanhe na barra de downloads do Chrome.");
+      const response = await request({ type: "download", videoId: id, target });
+      if (response.type !== "started") throw new Error("Não consegui iniciar o download.");
+      updateJob(response.job);
     } catch (err) {
+      infoCache.delete(id);
       setState("error", err instanceof Error ? err.message : String(err));
     }
   }
@@ -156,6 +172,31 @@ function mount(frame: HTMLElement, getVideoId: () => string | null): HTMLElement
   };
 
   const thumbnailItem = (id: string) => item("Thumbnail", "jpg", () => download(id, { kind: "thumbnail" }));
+
+  const jobLabel = (job: DownloadJob) => {
+    const phase = {
+      preparing: "Preparando vídeo…", downloading: "Baixando…", merging: "Juntando áudio e vídeo…",
+      saving: "Salvando arquivo…", complete: "Download concluído", error: "Falha no download", cancelled: "Download cancelado",
+    }[job.phase];
+    return job.error ?? `${phase}${isActive(job) && job.progress !== undefined ? ` ${Math.floor(job.progress * 100)}%` : ""}`;
+  };
+
+  function renderJob(job: DownloadJob) {
+    showingJob = true;
+    const label = el("div", "status", jobLabel(job));
+    menu.replaceChildren(label);
+    if (job.videoId !== getVideoId()) menu.prepend(el("div", "status", job.title));
+    if (job.bytes) menu.appendChild(el("div", "label", `${(job.bytes / 1024 / 1024).toFixed(1)} MB recebidos`));
+    const id = getVideoId();
+    if (isActive(job)) {
+      menu.appendChild(item("Cancelar download", null, () => {
+        void request({ type: "cancel", jobId: job.id }).catch((error: unknown) =>
+          setState("error", error instanceof Error ? error.message : String(error)));
+      }));
+    } else if (id) {
+      menu.appendChild(item("Escolher download", null, () => { void openMenu(id); }));
+    }
+  }
 
   function render(id: string, info: Info) {
     const videos = info.qualities.length
@@ -180,6 +221,7 @@ function mount(frame: HTMLElement, getVideoId: () => string | null): HTMLElement
   }
 
   async function openMenu(id: string) {
+    showingJob = false;
     menu.replaceChildren(el("div", "label", "Carregando…"), el("hr", ""), thumbnailItem(id));
     menu.hidden = false;
     document.addEventListener("pointerdown", onOutside, true);
@@ -193,9 +235,15 @@ function mount(frame: HTMLElement, getVideoId: () => string | null): HTMLElement
   }
 
   button.addEventListener("click", () => {
-    if (button.dataset.state === "busy") return;
     if (!menu.hidden) return closeMenu();
     const id = getVideoId();
+    const job = (id ? jobs.get(id) : undefined) ?? [...jobs.values()].find(isActive);
+    if (job && (isActive(job) || job.phase === "error")) {
+      renderJob(job);
+      menu.hidden = false;
+      document.addEventListener("pointerdown", onOutside, true);
+      return;
+    }
     id ? openMenu(id) : setState("error", "Não identifiquei o vídeo");
   });
 
@@ -224,12 +272,22 @@ function mount(frame: HTMLElement, getVideoId: () => string | null): HTMLElement
   });
 
   frame.appendChild(host);
+  overlays.set(host, () => {
+    const id = getVideoId();
+    const job = id ? jobs.get(id) : undefined;
+    if (!job) return setState("idle", "Baixar");
+    setState(isActive(job) ? "busy" : job.phase === "complete" ? "done" : job.phase === "error" ? "error" : "idle", jobLabel(job));
+    if (isActive(job) || job.phase === "error") show();
+    if (!menu.hidden && showingJob) renderJob(job);
+  });
+  syncOverlays();
   return host;
 }
 
 // --- scanning ----------------------------------------------------------------
 
 function scan() {
+  syncOverlays();
   const selector = "#movie_player, #shorts-player, a[href*='/watch?v='], a[href*='/shorts/']";
   for (const node of document.querySelectorAll<HTMLElement>(selector)) {
     if (hosts.get(node)?.isConnected) continue;

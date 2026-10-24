@@ -3,7 +3,7 @@ import { cp, rm } from "node:fs/promises";
 await rm("dist", { recursive: true, force: true });
 
 const result = await Bun.build({
-  entrypoints: ["src/content.ts", "src/background.ts"],
+  entrypoints: ["src/content.ts", "src/background.ts", "src/offscreen.ts"],
   outdir: "dist",
   target: "browser",
 });
@@ -14,4 +14,5 @@ if (!result.success) {
 }
 
 await cp("manifest.json", "dist/manifest.json");
+await cp("offscreen.html", "dist/offscreen.html");
 console.log("dist/ pronto");
